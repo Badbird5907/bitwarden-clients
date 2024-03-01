@@ -219,6 +219,9 @@ export class VaultFilterComponent implements OnInit, OnDestroy {
       this.ciphers = this.ciphers.filter(
         (c) => !this.vaultFilterService.filterCipherForSelectedVault(c),
       );
+      this.ciphers = this.ciphers.sort((a, b) =>
+        this.cipherService.sortCiphersByFavouriteThenLastUsedThenName(a, b),
+      );
       return;
     }
     this.searchPending = true;
@@ -235,6 +238,9 @@ export class VaultFilterComponent implements OnInit, OnDestroy {
       }
       this.ciphers = this.ciphers.filter(
         (c) => !this.vaultFilterService.filterCipherForSelectedVault(c),
+      );
+      this.ciphers = this.ciphers.sort((a, b) =>
+        this.cipherService.sortCiphersByFavouriteThenLastUsedThenName(a, b),
       );
       this.searchPending = false;
     }, timeout);
