@@ -1,12 +1,13 @@
 import { Component, OnInit } from "@angular/core";
 import { FormBuilder } from "@angular/forms";
-import { BehaviorSubject, firstValueFrom, Observable, Subject } from "rxjs";
+import { BehaviorSubject, Observable, Subject, firstValueFrom } from "rxjs";
 import { concatMap, debounceTime, filter, map, switchMap, takeUntil, tap } from "rxjs/operators";
 
-import { AuthRequestServiceAbstraction } from "@bitwarden/auth/common";
+import { PinServiceAbstraction } from "@bitwarden/auth/common";
 import { VaultTimeoutSettingsService } from "@bitwarden/common/abstractions/vault-timeout/vault-timeout-settings.service";
 import { PolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
 import { PolicyType } from "@bitwarden/common/admin-console/enums";
+import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { UserVerificationService as UserVerificationServiceAbstraction } from "@bitwarden/common/auth/abstractions/user-verification/user-verification.service.abstraction";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
@@ -19,10 +20,15 @@ import { MessagingService } from "@bitwarden/common/platform/abstractions/messag
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { StateService } from "@bitwarden/common/platform/abstractions/state.service";
 import { BiometricStateService } from "@bitwarden/common/platform/biometrics/biometric-state.service";
-import { ThemeType, KeySuffixOptions } from "@bitwarden/common/platform/enums";
+import { KeySuffixOptions, ThemeType } from "@bitwarden/common/platform/enums";
 import { Utils } from "@bitwarden/common/platform/misc/utils";
 import { ThemeStateService } from "@bitwarden/common/platform/theming/theme-state.service";
 import { UserId } from "@bitwarden/common/types/guid";
+import {
+  VaultTimeout,
+  VaultTimeoutOption,
+  VaultTimeoutStringType,
+} from "@bitwarden/common/types/vault-timeout.type";
 import { DialogService } from "@bitwarden/components";
 
 import { SetPinComponent } from "../../auth/components/set-pin.component";
@@ -40,7 +46,7 @@ export class SettingsComponent implements OnInit {
   protected readonly VaultTimeoutAction = VaultTimeoutAction;
 
   showMinToTray = false;
-  vaultTimeoutOptions: any[];
+  vaultTimeoutOptions: VaultTimeoutOption[];
   localeOptions: any[];
   themeOptions: any[];
   clearClipboardOptions: any[];
@@ -71,20 +77,19 @@ export class SettingsComponent implements OnInit {
     timeout: { hours: number; minutes: number };
     action: "lock" | "logOut";
   }>;
-  previousVaultTimeout: number = null;
+  previousVaultTimeout: VaultTimeout = null;
 
   userHasMasterPassword: boolean;
   userHasPinSet: boolean;
 
   form = this.formBuilder.group({
     // Security
-    vaultTimeout: [null as number | null],
+    vaultTimeout: [null as VaultTimeout | null],
     vaultTimeoutAction: [VaultTimeoutAction.Lock],
     pin: [null as boolean | null],
     biometric: false,
     autoPromptBiometrics: false,
     requirePasswordOnStart: false,
-    approveLoginRequests: false,
     // Account Preferences
     clearClipboard: [null],
     minimizeOnCopyToClipboard: false,
@@ -111,6 +116,7 @@ export class SettingsComponent implements OnInit {
   private destroy$ = new Subject<void>();
 
   constructor(
+    private accountService: AccountService,
     private policyService: PolicyService,
     private formBuilder: FormBuilder,
     private i18nService: I18nService,
@@ -127,7 +133,7 @@ export class SettingsComponent implements OnInit {
     private desktopSettingsService: DesktopSettingsService,
     private biometricStateService: BiometricStateService,
     private desktopAutofillSettingsService: DesktopAutofillSettingsService,
-    private authRequestService: AuthRequestServiceAbstraction,
+    private pinService: PinServiceAbstraction,
     private logService: LogService,
     private nativeMessagingManifestService: NativeMessagingManifestService,
   ) {
@@ -156,24 +162,26 @@ export class SettingsComponent implements OnInit {
     this.showDuckDuckGoIntegrationOption = isMac;
 
     this.vaultTimeoutOptions = [
-      // { name: i18nService.t('immediately'), value: 0 },
       { name: this.i18nService.t("oneMinute"), value: 1 },
       { name: this.i18nService.t("fiveMinutes"), value: 5 },
       { name: this.i18nService.t("fifteenMinutes"), value: 15 },
       { name: this.i18nService.t("thirtyMinutes"), value: 30 },
       { name: this.i18nService.t("oneHour"), value: 60 },
       { name: this.i18nService.t("fourHours"), value: 240 },
-      { name: this.i18nService.t("onIdle"), value: -4 },
-      { name: this.i18nService.t("onSleep"), value: -3 },
+      { name: this.i18nService.t("onIdle"), value: VaultTimeoutStringType.OnIdle },
+      { name: this.i18nService.t("onSleep"), value: VaultTimeoutStringType.OnSleep },
     ];
 
     if (this.platformUtilsService.getDevice() !== DeviceType.LinuxDesktop) {
-      this.vaultTimeoutOptions.push({ name: this.i18nService.t("onLocked"), value: -2 });
+      this.vaultTimeoutOptions.push({
+        name: this.i18nService.t("onLocked"),
+        value: VaultTimeoutStringType.OnLocked,
+      });
     }
 
     this.vaultTimeoutOptions = this.vaultTimeoutOptions.concat([
-      { name: this.i18nService.t("onRestart"), value: -1 },
-      { name: this.i18nService.t("never"), value: null },
+      { name: this.i18nService.t("onRestart"), value: VaultTimeoutStringType.OnRestart },
+      { name: this.i18nService.t("never"), value: VaultTimeoutStringType.Never },
     ]);
 
     const localeOptions: any[] = [];
@@ -214,7 +222,9 @@ export class SettingsComponent implements OnInit {
     if ((await this.stateService.getUserId()) == null) {
       return;
     }
-    this.currentUserEmail = await this.stateService.getEmail();
+    this.currentUserEmail = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(map((a) => a?.email)),
+    );
     this.currentUserId = (await this.stateService.getUserId()) as UserId;
 
     this.availableVaultTimeoutActions$ = this.refreshTimeoutSettings$.pipe(
@@ -243,14 +253,19 @@ export class SettingsComponent implements OnInit {
       }),
     );
 
+    const userId = (await firstValueFrom(this.accountService.activeAccount$))?.id;
+
     // Load initial values
-    const pinStatus = await this.vaultTimeoutSettingsService.isPinLockSet();
-    this.userHasPinSet = pinStatus !== "DISABLED";
+    this.userHasPinSet = await this.pinService.isPinSet(userId);
+
+    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
 
     const initialValues = {
-      vaultTimeout: await this.vaultTimeoutSettingsService.getVaultTimeout(),
+      vaultTimeout: await firstValueFrom(
+        this.vaultTimeoutSettingsService.getVaultTimeoutByUserId$(activeAccount.id),
+      ),
       vaultTimeoutAction: await firstValueFrom(
-        this.vaultTimeoutSettingsService.vaultTimeoutAction$(),
+        this.vaultTimeoutSettingsService.getVaultTimeoutActionByUserId$(activeAccount.id),
       ),
       pin: this.userHasPinSet,
       biometric: await this.vaultTimeoutSettingsService.isBiometricLockSet(),
@@ -258,10 +273,8 @@ export class SettingsComponent implements OnInit {
       requirePasswordOnStart: await firstValueFrom(
         this.biometricStateService.requirePasswordOnStart$,
       ),
-      approveLoginRequests:
-        (await this.authRequestService.getAcceptAuthRequests(this.currentUserId)) ?? false,
       clearClipboard: await firstValueFrom(this.autofillSettingsService.clearClipboardDelay$),
-      minimizeOnCopyToClipboard: await this.stateService.getMinimizeOnCopyToClipboard(),
+      minimizeOnCopyToClipboard: await firstValueFrom(this.desktopSettingsService.minimizeOnCopy$),
       enableFavicons: await firstValueFrom(this.domainSettingsService.showFavicons$),
       enableTray: await firstValueFrom(this.desktopSettingsService.trayEnabled$),
       enableMinToTray: await firstValueFrom(this.desktopSettingsService.minimizeToTray$),
@@ -269,9 +282,12 @@ export class SettingsComponent implements OnInit {
       startToTray: await firstValueFrom(this.desktopSettingsService.startToTray$),
       openAtLogin: await firstValueFrom(this.desktopSettingsService.openAtLogin$),
       alwaysShowDock: await firstValueFrom(this.desktopSettingsService.alwaysShowDock$),
-      enableBrowserIntegration: await this.stateService.getEnableBrowserIntegration(),
-      enableBrowserIntegrationFingerprint:
-        await this.stateService.getEnableBrowserIntegrationFingerprint(),
+      enableBrowserIntegration: await firstValueFrom(
+        this.desktopSettingsService.browserIntegrationEnabled$,
+      ),
+      enableBrowserIntegrationFingerprint: await firstValueFrom(
+        this.desktopSettingsService.browserIntegrationFingerprintEnabled$,
+      ),
       enableDuckDuckGoBrowserIntegration: await firstValueFrom(
         this.desktopAutofillSettingsService.enableDuckDuckGoBrowserIntegration$,
       ),
@@ -295,7 +311,9 @@ export class SettingsComponent implements OnInit {
 
     this.refreshTimeoutSettings$
       .pipe(
-        switchMap(() => this.vaultTimeoutSettingsService.vaultTimeoutAction$()),
+        switchMap(() =>
+          this.vaultTimeoutSettingsService.getVaultTimeoutActionByUserId$(activeAccount.id),
+        ),
         takeUntil(this.destroy$),
       )
       .subscribe((action) => {
@@ -353,8 +371,8 @@ export class SettingsComponent implements OnInit {
       });
   }
 
-  async saveVaultTimeout(newValue: number) {
-    if (newValue == null) {
+  async saveVaultTimeout(newValue: VaultTimeout) {
+    if (newValue === VaultTimeoutStringType.Never) {
       const confirmed = await this.dialogService.openSimpleDialog({
         title: { key: "warning" },
         content: { key: "neverLockWarning" },
@@ -383,7 +401,10 @@ export class SettingsComponent implements OnInit {
 
     this.previousVaultTimeout = this.form.value.vaultTimeout;
 
+    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
+
     await this.vaultTimeoutSettingsService.setVaultTimeoutOptions(
+      activeAccount.id,
       newValue,
       this.form.value.vaultTimeoutAction,
     );
@@ -414,7 +435,10 @@ export class SettingsComponent implements OnInit {
       return;
     }
 
+    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
+
     await this.vaultTimeoutSettingsService.setVaultTimeoutOptions(
+      activeAccount.id,
       this.form.value.vaultTimeout,
       newValue,
     );
@@ -573,7 +597,10 @@ export class SettingsComponent implements OnInit {
   }
 
   async saveMinOnCopyToClipboard() {
-    await this.stateService.setMinimizeOnCopyToClipboard(this.form.value.minimizeOnCopyToClipboard);
+    await this.desktopSettingsService.setMinimizeOnCopy(
+      this.form.value.minimizeOnCopyToClipboard,
+      this.currentUserId,
+    );
   }
 
   async saveClearClipboard() {
@@ -631,7 +658,9 @@ export class SettingsComponent implements OnInit {
       return;
     }
 
-    await this.stateService.setEnableBrowserIntegration(this.form.value.enableBrowserIntegration);
+    await this.desktopSettingsService.setBrowserIntegrationEnabled(
+      this.form.value.enableBrowserIntegration,
+    );
 
     const errorResult = await this.nativeMessagingManifestService.generate(
       this.form.value.enableBrowserIntegration,
@@ -674,18 +703,11 @@ export class SettingsComponent implements OnInit {
     );
     if (errorResult !== null) {
       this.logService.error("Error in DDG browser integration: " + errorResult);
-      await this.dialogService.openSimpleDialog({
-        title: { key: "browserIntegrationUnsupportedTitle" },
-        content: errorResult.message,
-        acceptButtonText: { key: "ok" },
-        cancelButtonText: null,
-        type: "warning",
-      });
     }
   }
 
   async saveBrowserIntegrationFingerprint() {
-    await this.stateService.setEnableBrowserIntegrationFingerprint(
+    await this.desktopSettingsService.setBrowserIntegrationFingerprintEnabled(
       this.form.value.enableBrowserIntegrationFingerprint,
     );
   }
@@ -693,13 +715,6 @@ export class SettingsComponent implements OnInit {
   async saveHardwareAcceleration() {
     await this.desktopSettingsService.setHardwareAcceleration(
       this.form.value.enableHardwareAcceleration,
-    );
-  }
-
-  async updateApproveLoginRequests() {
-    await this.authRequestService.setAcceptAuthRequests(
-      this.form.value.approveLoginRequests,
-      this.currentUserId,
     );
   }
 
