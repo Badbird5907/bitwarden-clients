@@ -37,6 +37,7 @@ import { SelectionReadOnlyResponse } from "../admin-console/models/response/sele
 import { TokenService } from "../auth/abstractions/token.service";
 import { CreateAuthRequest } from "../auth/models/request/create-auth.request";
 import { DeviceVerificationRequest } from "../auth/models/request/device-verification.request";
+import { DisableTwoFactorAuthenticatorRequest } from "../auth/models/request/disable-two-factor-authenticator.request";
 import { EmailTokenRequest } from "../auth/models/request/email-token.request";
 import { EmailRequest } from "../auth/models/request/email.request";
 import { DeviceRequest } from "../auth/models/request/identity-token/device.request";
@@ -56,13 +57,14 @@ import { TwoFactorEmailRequest } from "../auth/models/request/two-factor-email.r
 import { TwoFactorProviderRequest } from "../auth/models/request/two-factor-provider.request";
 import { TwoFactorRecoveryRequest } from "../auth/models/request/two-factor-recovery.request";
 import { UpdateProfileRequest } from "../auth/models/request/update-profile.request";
+import { UpdateTdeOffboardingPasswordRequest } from "../auth/models/request/update-tde-offboarding-password.request";
 import { UpdateTempPasswordRequest } from "../auth/models/request/update-temp-password.request";
 import { UpdateTwoFactorAuthenticatorRequest } from "../auth/models/request/update-two-factor-authenticator.request";
 import { UpdateTwoFactorDuoRequest } from "../auth/models/request/update-two-factor-duo.request";
 import { UpdateTwoFactorEmailRequest } from "../auth/models/request/update-two-factor-email.request";
 import { UpdateTwoFactorWebAuthnDeleteRequest } from "../auth/models/request/update-two-factor-web-authn-delete.request";
 import { UpdateTwoFactorWebAuthnRequest } from "../auth/models/request/update-two-factor-web-authn.request";
-import { UpdateTwoFactorYubioOtpRequest } from "../auth/models/request/update-two-factor-yubio-otp.request";
+import { UpdateTwoFactorYubikeyOtpRequest } from "../auth/models/request/update-two-factor-yubikey-otp.request";
 import { ApiKeyResponse } from "../auth/models/response/api-key.response";
 import { AuthRequestResponse } from "../auth/models/response/auth-request.response";
 import { DeviceVerificationResponse } from "../auth/models/response/device-verification.response";
@@ -249,7 +251,7 @@ export class ApiService implements ApiServiceAbstraction {
 
   async refreshIdentityToken(): Promise<any> {
     try {
-      await this.doAuthRefresh();
+      await this.refreshToken();
     } catch (e) {
       this.logService.error("Error refreshing access token: ", e);
       throw e;
@@ -458,6 +460,10 @@ export class ApiService implements ApiServiceAbstraction {
 
   putUpdateTempPassword(request: UpdateTempPasswordRequest): Promise<any> {
     return this.send("PUT", "/accounts/update-temp-password", request, true, false);
+  }
+
+  putUpdateTdeOffboardingPassword(request: UpdateTdeOffboardingPasswordRequest): Promise<void> {
+    return this.send("PUT", "/accounts/update-tde-offboarding-password", request, true, false);
   }
 
   postConvertToKeyConnector(): Promise<void> {
@@ -791,7 +797,7 @@ export class ApiService implements ApiServiceAbstraction {
       true,
       true,
     );
-    return new CollectionDetailsResponse(r);
+    return new CollectionAccessDetailsResponse(r);
   }
 
   async putCollection(
@@ -806,7 +812,7 @@ export class ApiService implements ApiServiceAbstraction {
       true,
       true,
     );
-    return new CollectionDetailsResponse(r);
+    return new CollectionAccessDetailsResponse(r);
   }
 
   async putCollectionUsers(
@@ -998,6 +1004,13 @@ export class ApiService implements ApiServiceAbstraction {
     return new TwoFactorAuthenticatorResponse(r);
   }
 
+  async deleteTwoFactorAuthenticator(
+    request: DisableTwoFactorAuthenticatorRequest,
+  ): Promise<TwoFactorProviderResponse> {
+    const r = await this.send("DELETE", "/two-factor/authenticator", request, true, true);
+    return new TwoFactorProviderResponse(r);
+  }
+
   async putTwoFactorEmail(request: UpdateTwoFactorEmailRequest): Promise<TwoFactorEmailResponse> {
     const r = await this.send("PUT", "/two-factor/email", request, true, true);
     return new TwoFactorEmailResponse(r);
@@ -1023,7 +1036,7 @@ export class ApiService implements ApiServiceAbstraction {
   }
 
   async putTwoFactorYubiKey(
-    request: UpdateTwoFactorYubioOtpRequest,
+    request: UpdateTwoFactorYubikeyOtpRequest,
   ): Promise<TwoFactorYubiKeyResponse> {
     const r = await this.send("PUT", "/two-factor/yubikey", request, true, true);
     return new TwoFactorYubiKeyResponse(r);
@@ -1566,8 +1579,7 @@ export class ApiService implements ApiServiceAbstraction {
   async getActiveBearerToken(): Promise<string> {
     let accessToken = await this.tokenService.getAccessToken();
     if (await this.tokenService.tokenNeedsRefresh()) {
-      await this.doAuthRefresh();
-      accessToken = await this.tokenService.getAccessToken();
+      accessToken = await this.refreshToken();
     }
     return accessToken;
   }
@@ -1707,16 +1719,16 @@ export class ApiService implements ApiServiceAbstraction {
     );
   }
 
-  protected async doAuthRefresh(): Promise<void> {
+  protected async refreshToken(): Promise<string> {
     const refreshToken = await this.tokenService.getRefreshToken();
     if (refreshToken != null && refreshToken !== "") {
-      return this.doRefreshToken();
+      return this.refreshAccessToken();
     }
 
     const clientId = await this.tokenService.getClientId();
     const clientSecret = await this.tokenService.getClientSecret();
     if (!Utils.isNullOrWhitespace(clientId) && !Utils.isNullOrWhitespace(clientSecret)) {
-      return this.doApiTokenRefresh();
+      return this.refreshApiToken();
     }
 
     this.refreshAccessTokenErrorCallback();
@@ -1724,7 +1736,7 @@ export class ApiService implements ApiServiceAbstraction {
     throw new Error("Cannot refresh access token, no refresh token or api keys are stored.");
   }
 
-  protected async doRefreshToken(): Promise<void> {
+  protected async refreshAccessToken(): Promise<string> {
     const refreshToken = await this.tokenService.getRefreshToken();
     if (refreshToken == null || refreshToken === "") {
       throw new Error();
@@ -1770,19 +1782,20 @@ export class ApiService implements ApiServiceAbstraction {
         this.vaultTimeoutSettingsService.getVaultTimeoutByUserId$(userId),
       );
 
-      await this.tokenService.setTokens(
+      const refreshedTokens = await this.tokenService.setTokens(
         tokenResponse.accessToken,
         vaultTimeoutAction as VaultTimeoutAction,
         vaultTimeout,
         tokenResponse.refreshToken,
       );
+      return refreshedTokens.accessToken;
     } else {
       const error = await this.handleError(response, true, true);
       return Promise.reject(error);
     }
   }
 
-  protected async doApiTokenRefresh(): Promise<void> {
+  protected async refreshApiToken(): Promise<string> {
     const clientId = await this.tokenService.getClientId();
     const clientSecret = await this.tokenService.getClientSecret();
 
@@ -1810,11 +1823,12 @@ export class ApiService implements ApiServiceAbstraction {
       this.vaultTimeoutSettingsService.getVaultTimeoutByUserId$(userId),
     );
 
-    await this.tokenService.setAccessToken(
+    const refreshedToken = await this.tokenService.setAccessToken(
       response.accessToken,
       vaultTimeoutAction as VaultTimeoutAction,
       vaultTimeout,
     );
+    return refreshedToken;
   }
 
   async send(
